@@ -485,6 +485,61 @@ class SessionServiceImplTest {
         assertEquals(ADMIN, user.getName());
     }
 
+    private static final String API_TOKEN = "test-api-token-0123456789abcdefghijklmnop";
+
+    @Test
+    void bearerTokenIsIgnoredWhenNoTokenIsConfigured() {
+        assertNull(sessionService.validateSession(authorizationRequest("Bearer " + API_TOKEN)));
+    }
+
+    @Test
+    void configuredPlaintextBearerTokenAuthenticatesAsAdmin() {
+        sessionService.setApiTokens(" other-token-0123456789abcdefghijklmnop , " + API_TOKEN + " ");
+
+        User user = sessionService.validateSession(authorizationRequest("Bearer " + API_TOKEN));
+
+        assertNotNull(user);
+        assertEquals(ADMIN, user.getName());
+        assertNull(sessionService.validateSession(authorizationRequest("Bearer wrong-token")));
+        assertNull(sessionService.validateSession(authorizationRequest("bearer " + API_TOKEN)));
+    }
+
+    @Test
+    void sha256BearerTokenEntryAuthenticates() {
+        String digest = com.google.common.hash.Hashing.sha256().hashString(API_TOKEN, StandardCharsets.UTF_8)
+            .toString();
+        sessionService.setApiTokens("sha256:" + digest.toUpperCase());
+
+        assertNotNull(sessionService.validateSession(authorizationRequest("Bearer " + API_TOKEN)));
+    }
+
+    @Test
+    void bearerTokenWorksWhileBasicAuthIsDisabled() {
+        sessionService.setApiTokens(API_TOKEN);
+
+        assertNotNull(sessionService.validateSession(authorizationRequest("Bearer " + API_TOKEN)));
+        assertNull(sessionService.validateSession(basicRequest(ADMIN, OLD_PASSWORD)));
+    }
+
+    @Test
+    void repeatedBearerFailuresAreRateLimitedWithoutAffectingFormLogin() {
+        sessionService.setApiTokens(API_TOKEN);
+        for (int i = 0; i < 5; i++) {
+            assertNull(sessionService.validateSession(authorizationRequest("Bearer wrong-token")));
+        }
+        assertThrows(LoginRateLimitException.class,
+            () -> sessionService.validateSession(authorizationRequest("Bearer wrong-token")));
+
+        assertNotNull(formLogin(ADMIN, PASSWORD, request()));
+    }
+
+    @Test
+    void invalidApiTokenConfigurationIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> SessionServiceImpl.parseApiTokens("sha256:abc"));
+        assertThrows(IllegalArgumentException.class, () -> SessionServiceImpl.parseApiTokens("too-short"));
+        assertTrue(SessionServiceImpl.parseApiTokens(" , ").isEmpty());
+    }
+
     private SessionServiceImpl newService(SessionStore store) throws ApiException {
         return newService(store, kubernetesClientService());
     }

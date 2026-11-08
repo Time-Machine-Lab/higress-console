@@ -25,7 +25,12 @@ public enum LoginAuthSource {
     /**
      * HTTP Basic authentication.
      */
-    BASIC("basic");
+    BASIC("basic"),
+
+    /**
+     * Static API token presented as a Bearer credential.
+     */
+    TOKEN("token");
 
     private final String key;
 

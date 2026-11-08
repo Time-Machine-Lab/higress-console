@@ -16,9 +16,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -42,6 +46,7 @@ import com.alibaba.higress.sdk.exception.BusinessException;
 import com.alibaba.higress.sdk.exception.ValidationException;
 import com.alibaba.higress.sdk.service.kubernetes.KubernetesClientService;
 import com.google.common.hash.Hashing;
+import com.google.common.io.BaseEncoding;
 
 import io.kubernetes.client.openapi.ApiException;
 import io.kubernetes.client.openapi.models.V1ObjectMeta;
@@ -69,6 +74,11 @@ public class SessionServiceImpl implements SessionService {
     private static final String SESSION_COOKIE_SAME_SITE = "Lax";
     static final long SESSION_TOUCH_INTERVAL_MILLIS = 60_000L;
     private static final String UNKNOWN_CLIENT_IP = "unknown";
+    private static final String BEARER_SCHEME = "Bearer";
+    private static final String API_TOKEN_ACCOUNT = "api-token";
+    private static final String API_TOKEN_SHA256_PREFIX = "sha256:";
+    private static final int API_TOKEN_MIN_LENGTH = 32;
+    private static final String API_TOKEN_SEPARATOR = ",";
 
     @Value("${" + SystemConfigKey.ADMIN_COOKIE_NAME_KEY + ":" + SystemConfigKey.ADMIN_COOKIE_NAME_DEFAULT + "}")
     private String cookieName = SystemConfigKey.ADMIN_COOKIE_NAME_DEFAULT;
@@ -86,6 +96,8 @@ public class SessionServiceImpl implements SessionService {
     @Value("${" + SystemConfigKey.ADMIN_BASIC_AUTH_ENABLED_KEY + ":"
         + SystemConfigKey.ADMIN_BASIC_AUTH_ENABLED_DEFAULT + "}")
     private boolean basicAuthEnabled = SystemConfigKey.ADMIN_BASIC_AUTH_ENABLED_DEFAULT;
+
+    private volatile List<byte[]> apiTokenDigests = Collections.emptyList();
 
     @Value("${" + SystemConfigKey.SECRET_NAME_KEY + ":" + SystemConfigKey.SECRET_NAME_DEFAULT + "}")
     private String secretName = SystemConfigKey.SECRET_NAME_DEFAULT;
@@ -132,6 +144,14 @@ public class SessionServiceImpl implements SessionService {
     public void setAbsoluteTimeout(long absoluteTimeout) {
         this.absoluteTimeout =
             SessionData.validateTimeout(SystemConfigKey.ADMIN_SESSION_ABSOLUTE_TIMEOUT_KEY, absoluteTimeout);
+    }
+
+    @Value("${" + SystemConfigKey.ADMIN_API_TOKENS_KEY + ":" + SystemConfigKey.ADMIN_API_TOKENS_DEFAULT + "}")
+    public void setApiTokens(String apiTokens) {
+        this.apiTokenDigests = parseApiTokens(apiTokens);
+        if (!apiTokenDigests.isEmpty()) {
+            log.info("Bearer API token authentication is enabled with {} token(s).", apiTokenDigests.size());
+        }
     }
 
     @Resource
@@ -298,15 +318,18 @@ public class SessionServiceImpl implements SessionService {
     }
 
     private User tryExtractUserFromAuthHeader(HttpServletRequest request) {
-        if (!basicAuthEnabled) {
-            return null;
-        }
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
         if (StringUtils.isBlank(header)) {
             return null;
         }
         String[] parts = header.split(" ");
-        if (parts.length != 2 || !"Basic".equals(parts[0])) {
+        if (parts.length != 2) {
+            return null;
+        }
+        if (BEARER_SCHEME.equals(parts[0])) {
+            return tryExtractUserFromApiToken(parts[1], request);
+        }
+        if (!basicAuthEnabled || !"Basic".equals(parts[0])) {
             return null;
         }
         String decoded;
@@ -324,6 +347,58 @@ public class SessionServiceImpl implements SessionService {
         LoginAttemptKey key = createLoginAttemptKey(LoginAuthSource.BASIC, username, request);
         loginFailureBudgetService.ensureNotLocked(key);
         return completeAuthentication(key, validateCredential(username, password));
+    }
+
+    private User tryExtractUserFromApiToken(String token, HttpServletRequest request) {
+        List<byte[]> digests = apiTokenDigests;
+        if (digests.isEmpty() || StringUtils.isBlank(token)) {
+            return null;
+        }
+        LoginAttemptKey key = createLoginAttemptKey(LoginAuthSource.TOKEN, API_TOKEN_ACCOUNT, request);
+        loginFailureBudgetService.ensureNotLocked(key);
+        byte[] presented = Hashing.sha256().hashString(token, StandardCharsets.UTF_8).asBytes();
+        boolean matched = false;
+        for (byte[] digest : digests) {
+            // Compare against every configured token so timing does not reveal which entry matched.
+            matched |= MessageDigest.isEqual(digest, presented);
+        }
+        if (!matched) {
+            return completeAuthentication(key, null);
+        }
+        AdminConfig config = tryGetAdminConfig();
+        if (config == null) {
+            // A valid token cannot act before the admin account exists; this is not a guessing failure.
+            return null;
+        }
+        return completeAuthentication(key, config.toUser());
+    }
+
+    static List<byte[]> parseApiTokens(String raw) {
+        if (StringUtils.isBlank(raw)) {
+            return Collections.emptyList();
+        }
+        List<byte[]> digests = new ArrayList<>();
+        for (String entry : raw.split(API_TOKEN_SEPARATOR)) {
+            String token = entry.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+            if (token.startsWith(API_TOKEN_SHA256_PREFIX)) {
+                String hex = token.substring(API_TOKEN_SHA256_PREFIX.length()).toLowerCase(Locale.ROOT);
+                if (!hex.matches("[0-9a-f]{64}")) {
+                    throw new IllegalArgumentException(
+                        SystemConfigKey.ADMIN_API_TOKENS_KEY + " contains an invalid sha256 digest entry.");
+                }
+                digests.add(BaseEncoding.base16().lowerCase().decode(hex));
+            } else {
+                if (token.length() < API_TOKEN_MIN_LENGTH) {
+                    throw new IllegalArgumentException(SystemConfigKey.ADMIN_API_TOKENS_KEY
+                        + " entries must be at least " + API_TOKEN_MIN_LENGTH + " characters long.");
+                }
+                digests.add(Hashing.sha256().hashString(token, StandardCharsets.UTF_8).asBytes());
+            }
+        }
+        return Collections.unmodifiableList(digests);
     }
 
     private LoginAttemptKey createLoginAttemptKey(LoginAuthSource source, String username,

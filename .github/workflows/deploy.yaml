@@ -1,0 +1,84 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "deploy/**"
+      - ".github/workflows/deploy.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B clean package -f ./backend/pom.xml -Dpmd.language=en
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: higress-console-jar
+          path: backend/console/target/higress-console.jar
+          retention-days: 7
+
+  deploy:
+    name: Deploy to server
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: higress-console-jar
+          path: release
+
+      - name: Prepare release bundle
+        id: bundle
+        run: |
+          version="$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}"
+          cp deploy/Dockerfile deploy/deploy.sh release/
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release: \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload and deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          VERSION: ${{ steps.bundle.outputs.version }}
+        run: |
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          dir="/opt/higress/releases/$VERSION"
+          ssh -i ~/.ssh/deploy_key "$target" "mkdir -p '$dir'"
+          scp -i ~/.ssh/deploy_key release/higress-console.jar release/Dockerfile release/deploy.sh "$target:$dir/"
+          ssh -i ~/.ssh/deploy_key "$target" "bash '$dir/deploy.sh' '$VERSION'"

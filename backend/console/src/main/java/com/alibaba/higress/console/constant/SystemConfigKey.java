@@ -80,6 +80,15 @@ public class SystemConfigKey {
 
     public static final boolean ADMIN_BASIC_AUTH_ENABLED_DEFAULT = false;
 
+    /**
+     * Static API tokens accepted as {@code Authorization: Bearer <token>} for machine clients (e.g. an MCP gateway).
+     * Comma-separated; each entry is either a plaintext token or {@code sha256:<hex digest of the token>}.
+     * Empty disables token authentication. Env: {@code HIGRESS_CONSOLE_ADMIN_API_TOKENS}.
+     */
+    public static final String ADMIN_API_TOKENS_KEY = CONFIG_KEY_PREFIX + "admin.api-tokens";
+
+    public static final String ADMIN_API_TOKENS_DEFAULT = "";
+
     public static final String ADMIN_CONFIG_TTL_KEY = CONFIG_KEY_PREFIX + "admin.config-ttl";
 
     public static final long ADMIN_CONFIG_TTL_DEFAULT = 10 * 1000;

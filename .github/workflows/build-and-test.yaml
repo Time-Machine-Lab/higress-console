@@ -1,8 +1,7 @@
 name: "Build and Test"
 
 on:
-  push:
-    branches: [ "main" ]
+  # main pushes are built (and tested) by deploy.yaml
   pull_request:
     branches: [ "*" ]
 
