@@ -1,0 +1,230 @@
+openapi: 3.0.3
+info:
+  title: Higress Admin (接入新产品用)
+  version: "2026.11.08"
+  description: |
+    Higress 控制台管理接口的子集，用来把一个产品的 OpenAPI 接入成 MCP 服务。
+    只开放查询、新建和更新；删除类操作不开放，请在控制台手动处理。
+
+    标准接入流程：
+    1. upsertServiceSource 建上游服务（DNS 类型，name 不要带后缀），得到的服务名是 <name>.dns
+    2. convertOpenApiToMcp 把产品 OpenAPI 转成 MCP YAML（只转换，不生效）
+    3. 修改 YAML：server.name 改成 MCP 服务名，securitySchemes 里写上游凭证（defaultCredential），
+       每个工具的 requestTemplate.security 指向该 scheme，删掉 responseTemplate
+    4. upsertMcpServer 创建/更新 MCP 服务，consumerAuthInfo 必须 enable=true
+    5. createConsumer 给调用方建 Key，grantMcpServerConsumers 授权
+
+    禁止修改名为 higress-admin 的 MCP 服务和 higress-console 上游服务（这是本 MCP 自身）。
+servers:
+  - url: http://127.0.0.1:8001
+security:
+  - ConsoleToken: []
+
+paths:
+  /system/info:
+    get:
+      operationId: getSystemInfo
+      summary: 获取 Higress 版本与能力信息
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+  /v1/service-sources:
+    get:
+      operationId: listServiceSources
+      summary: 列出上游服务来源（DNS/静态地址等）
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+  /v1/service-sources/{name}:
+    get:
+      operationId: getServiceSource
+      summary: 查看一个上游服务来源
+      parameters:
+        - { $ref: "#/components/parameters/Name" }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+    put:
+      operationId: upsertServiceSource
+      summary: 创建或更新上游服务来源。DNS 类型生成的服务名为 <name>.dns，供 upsertMcpServer 的 services 使用
+      parameters:
+        - { $ref: "#/components/parameters/Name" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, domain, port, protocol]
+              properties:
+                type: { type: string, enum: [dns, static], description: "dns：域名；static：IP:端口" }
+                domain: { type: string, description: "dns 填域名（如 api.example.com）；static 填 IP:端口" }
+                port: { type: integer, description: "端口，HTTPS 通常为 443，static 类型固定填 80" }
+                protocol: { type: string, enum: [http, https], description: 访问上游用的协议 }
+                sni: { type: string, description: "HTTPS 时填上游域名" }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+  /v1/services:
+    get:
+      operationId: listServices
+      summary: 列出网关可用的服务（含 <name>.dns 形式的服务名和端口）
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+  /v1/mcpServer/swaggerToMcpConfig:
+    post:
+      operationId: convertOpenApiToMcp
+      summary: 把 OpenAPI 3.0 文档（YAML 或 JSON 字符串）转换成 MCP 服务 YAML 配置，只返回结果不生效
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, description: 完整的 OpenAPI 文档文本 }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+  /v1/mcpServer:
+    get:
+      operationId: listMcpServers
+      summary: 列出已接入的 MCP 服务
+      parameters:
+        - { name: mcpServerName, in: query, schema: { type: string }, description: 按名称过滤 }
+        - { name: pageNum, in: query, schema: { type: integer } }
+        - { name: pageSize, in: query, schema: { type: integer } }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+    put:
+      operationId: upsertMcpServer
+      summary: 创建或更新 MCP 服务（同名覆盖）。访问地址为 https://mcp.tmlab.top/mcp-servers/<name>
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type, services, consumerAuthInfo, rawConfigurations]
+              properties:
+                name: { type: string, description: "MCP 服务名，小写字母、数字、连字符，如 z-api-dev" }
+                description: { type: string }
+                type: { type: string, enum: [OPEN_API], description: 固定 OPEN_API }
+                domains:
+                  type: array
+                  items: { type: string }
+                  description: 留空表示所有域名
+                services:
+                  type: array
+                  description: "上游服务，如 [{\"name\":\"z-api-dev.dns\",\"port\":443,\"weight\":100}]"
+                  items:
+                    type: object
+                    properties:
+                      name: { type: string }
+                      port: { type: integer }
+                      weight: { type: integer }
+                consumerAuthInfo:
+                  type: object
+                  description: "必须开启：{\"type\":\"key-auth\",\"enable\":true,\"allowedConsumers\":[\"...\"]}"
+                  properties:
+                    type: { type: string, enum: [key-auth] }
+                    enable: { type: boolean }
+                    allowedConsumers:
+                      type: array
+                      items: { type: string }
+                rawConfigurations: { type: string, description: convertOpenApiToMcp 产出并修改后的完整 YAML }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+  /v1/mcpServer/{name}:
+    get:
+      operationId: getMcpServer
+      summary: 查看一个 MCP 服务的完整配置（含 YAML）
+      parameters:
+        - { $ref: "#/components/parameters/Name" }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+  /v1/mcpServer/consumers:
+    get:
+      operationId: listMcpServerConsumers
+      summary: 查看某个 MCP 服务允许哪些调用方
+      parameters:
+        - { name: mcpServerName, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+    put:
+      operationId: grantMcpServerConsumers
+      summary: 允许调用方（消费者）访问某个 MCP 服务（追加，不影响已有授权）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mcpServerName, consumers]
+              properties:
+                mcpServerName: { type: string }
+                consumers:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+  /v1/consumers:
+    get:
+      operationId: listConsumers
+      summary: 列出调用方（消费者），不返回 Key
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+    post:
+      operationId: createConsumer
+      summary: 新建调用方并设置 Bearer Key。Key 由调用方自己生成（建议 48 位以上随机十六进制），之后无法再读出
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, credentials]
+              properties:
+                name: { type: string, description: "如 claude-ops、ops-lines" }
+                credentials:
+                  type: array
+                  description: "固定写法：[{\"type\":\"key-auth\",\"source\":\"BEARER\",\"values\":[\"<key>\"]}]"
+                  items:
+                    type: object
+                    properties:
+                      type: { type: string, enum: [key-auth] }
+                      source: { type: string, enum: [BEARER] }
+                      values:
+                        type: array
+                        items: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+  /v1/consumers/{name}:
+    get:
+      operationId: getConsumer
+      summary: 查看一个调用方（不返回 Key）
+      parameters:
+        - { $ref: "#/components/parameters/Name" }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+
+components:
+  securitySchemes:
+    ConsoleToken:
+      type: apiKey
+      in: header
+      name: Authorization
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Json:
+      description: 控制台响应（success/message/data）
+      content:
+        application/json:
+          schema:
+            type: object
