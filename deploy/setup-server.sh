@@ -31,13 +31,20 @@ chmod 600 "$ROOT/console.env" "$TOKEN_FILE"
 # 3. Redis password used by Higress MCP (created earlier; generate if absent).
 [ -s "$ROOT/redis.pass" ] || openssl rand -hex 16 > "$ROOT/redis.pass"
 
-# 4. nginx + certbot.
+# 4. Host ports (loopback). Set CONSOLE_PORT / GATEWAY_PORT / GATEWAY_TLS_PORT when the defaults are taken.
 umask 022
+if [ ! -f "$ROOT/ports.env" ] || [ -n "${GATEWAY_PORT:-}${CONSOLE_PORT:-}${GATEWAY_TLS_PORT:-}" ]; then
+  printf 'CONSOLE_PORT=%s\nGATEWAY_PORT=%s\nGATEWAY_TLS_PORT=%s\n' \
+    "${CONSOLE_PORT:-8001}" "${GATEWAY_PORT:-8080}" "${GATEWAY_TLS_PORT:-8443}" > "$ROOT/ports.env"
+fi
+# shellcheck disable=SC1091
+. "$ROOT/ports.env"
+
+# 5. nginx + certbot (shared with other sites on the host: only our own site file is touched).
 if ! command -v nginx >/dev/null || ! command -v certbot >/dev/null; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx certbot >/dev/null
 fi
 mkdir -p /var/www/certbot
-rm -f /etc/nginx/sites-enabled/default
 CONF=/etc/nginx/sites-available/higress-gateway.conf
 if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
   # Serve only the ACME challenge until the certificate exists.
@@ -55,7 +62,7 @@ EOF
   certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN" \
     --non-interactive --agree-tos --register-unsafely-without-email
 fi
-sed "s/__DOMAIN__/$DOMAIN/g" "$SRC_DIR/nginx/higress-gateway.conf" > "$CONF"
+sed -e "s/__DOMAIN__/$DOMAIN/g" -e "s/__GATEWAY_PORT__/$GATEWAY_PORT/g" "$SRC_DIR/nginx/higress-gateway.conf" > "$CONF"
 ln -sf "$CONF" /etc/nginx/sites-enabled/higress-gateway.conf
 nginx -t && systemctl reload nginx
 

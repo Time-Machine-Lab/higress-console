@@ -13,7 +13,17 @@ import sys
 
 import yaml
 
-CONSOLE = "http://127.0.0.1:8001"
+def _console_port():
+    try:
+        for line in open("/opt/higress/ports.env"):
+            if line.startswith("CONSOLE_PORT="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return "8001"
+
+
+CONSOLE = f"http://127.0.0.1:{_console_port()}"
 SECRETS = "/opt/higress/secrets"
 SPEC = sys.argv[1] if len(sys.argv) > 1 else "/tmp/higress-admin-openapi.yaml"
 MCP_NAME = "higress-admin"

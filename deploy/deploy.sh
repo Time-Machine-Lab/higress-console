@@ -18,6 +18,13 @@ ENV_FILE="$ROOT/console.env"
 TOKEN_FILE="$ROOT/secrets/console-api-token"
 KEEP_RELEASES=3
 
+# Host-side ports (loopback only). Override in $ROOT/ports.env on hosts where the defaults are taken.
+CONSOLE_PORT=8001
+GATEWAY_PORT=8080
+GATEWAY_TLS_PORT=8443
+# shellcheck disable=SC1091
+[ -f "$ROOT/ports.env" ] && . "$ROOT/ports.env"
+
 log() { echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 
 for f in "$RELEASE_DIR/higress-console.jar" "$RELEASE_DIR/Dockerfile" "$ENV_FILE" "$TOKEN_FILE" "$ROOT/redis.pass"; do
@@ -32,7 +39,7 @@ run_higress() {
   docker run -d --name "$NAME" --restart unless-stopped \
     --env-file "$ENV_FILE" \
     -v "$ROOT/data:/data" \
-    -p 127.0.0.1:8001:8001 -p 127.0.0.1:8080:8080 -p 127.0.0.1:8443:8443 \
+    -p "127.0.0.1:$CONSOLE_PORT:8001" -p "127.0.0.1:$GATEWAY_PORT:8080" -p "127.0.0.1:$GATEWAY_TLS_PORT:8443" \
     "$1" >/dev/null
 }
 
@@ -49,9 +56,9 @@ wait_ready() {
   local token
   token="$(cat "$TOKEN_FILE")"
   for _ in $(seq 1 72); do
-    if curl -fsS -o /dev/null http://127.0.0.1:8001/healthz/ready \
-      && curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8001/v1/mcpServer | grep -q '"success":true' \
-      && curl -s -o /dev/null http://127.0.0.1:8080/; then
+    if curl -fsS -o /dev/null "http://127.0.0.1:$CONSOLE_PORT/healthz/ready" \
+      && curl -fsS -H "Authorization: Bearer $token" "http://127.0.0.1:$CONSOLE_PORT/v1/mcpServer" | grep -q '"success":true' \
+      && curl -s -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/"; then
       return 0
     fi
     sleep 5

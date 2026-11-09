@@ -18,6 +18,7 @@ through `/opt/higress/console.env`.
 | `data/` | Higress all-in-one data volume |
 | `releases/<version>/` | Uploaded jar + Dockerfile + deploy.sh (last 3 kept) |
 | `console.env` | Env file for the container (token digest) |
+| `ports.env` | Loopback host ports (`CONSOLE_PORT`, `GATEWAY_PORT`, `GATEWAY_TLS_PORT`; default 8001/8080/8443) |
 | `secrets/` | console API token, `ops-admin` / `claude-ops` consumer keys |
 | `redis.pass` | Password of the `higress-redis` container used by Higress MCP |
 | `setup/` | Copy of this directory used for one-time setup |
@@ -26,7 +27,7 @@ through `/opt/higress/console.env`.
 
 1. `setup-server.sh` (one time, idempotent): pins the running all-in-one image as `higress-aio-base:pinned`,
    generates the console token, installs nginx + certbot and issues the certificate for `$DOMAIN`.
-   nginx terminates HTTPS and proxies to the gateway on `127.0.0.1:8080`; certbot renews via `certbot.timer`
+   nginx terminates HTTPS and proxies to the gateway on `127.0.0.1:$GATEWAY_PORT`; certbot renews via `certbot.timer`
    and reloads nginx through a deploy hook.
 2. Push to `main` → `.github/workflows/deploy.yaml` builds the jar, uploads it with `deploy.sh`, which builds
    `higress-aio-tml:<version>`, swaps the container, checks console readiness + token auth + gateway, and rolls back
