@@ -13,7 +13,7 @@ through `/opt/higress/console.env`.
 
 ## Where it runs
 
-Since 2026-11-11 Higress runs on the K3s cluster (`k3s.seasonschange.cn`), namespace `higress`.
+Since 2026-11-11 Higress runs on the K3s cluster (`k3s.tmlab.top`), namespace `higress`.
 The manifest is `k3s/higress.yaml`: one pod with the all-in-one container plus a Redis sidecar
 (Higress MCP expects Redis on `127.0.0.1:6379`).
 
