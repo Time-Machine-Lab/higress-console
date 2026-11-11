@@ -41,10 +41,12 @@ jobs:
           path: backend/console/target/higress-console.jar
           retention-days: 7
 
-  deploy:
-    name: Deploy to server
+  image:
+    name: Build and push image
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -55,32 +57,107 @@ jobs:
           name: higress-console-jar
           path: release
 
-      - name: Prepare release bundle
-        id: bundle
+      - name: Image name
+        id: meta
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
         run: |
           version="$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}"
-          cp deploy/Dockerfile deploy/deploy.sh release/
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Release: \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+          image="docker.io/${DOCKER_USERNAME}/higress-console:${version}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Image: \`$image\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Upload and deploy
+      - name: Build and push
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          VERSION: ${{ steps.bundle.outputs.version }}
+          IMAGE: ${{ steps.meta.outputs.image }}
         run: |
-          target="$DEPLOY_USER@$DEPLOY_HOST"
-          dir="/opt/higress/releases/$VERSION"
-          ssh -i ~/.ssh/deploy_key "$target" "mkdir -p '$dir'"
-          scp -i ~/.ssh/deploy_key release/higress-console.jar release/Dockerfile release/deploy.sh "$target:$dir/"
-          ssh -i ~/.ssh/deploy_key "$target" "bash '$dir/deploy.sh' '$VERSION'"
+          set -euo pipefail
+          cp deploy/Dockerfile release/
+          docker build -t "$IMAGE" release
+          docker push "$IMAGE"
+
+  deploy:
+    name: Deploy to K3s
+    needs: image
+    runs-on: ubuntu-latest
+    env:
+      # Production runs on the K3s cluster (k3s.seasonschange.cn), namespace higress.
+      # KUBE_CONFIG is a kubeconfig for the namespace-scoped ServiceAccount higress/ci-deployer.
+      NAMESPACE: higress
+      IMAGE: ${{ needs.image.outputs.image }}
+      PUBLIC_URL: https://mcp.tmlab.top
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: deploy
+
+      - name: Configure cluster access
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KUBE_CONFIG" ]] || { echo "::error::Repository secret KUBE_CONFIG is required."; exit 1; }
+          install -m 700 -d ~/.kube
+          printf '%s\n' "$KUBE_CONFIG" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl -n "$NAMESPACE" get deployment higress
+
+      # The Deployment uses strategy Recreate (one instance owns /data), so make sure the node can
+      # pull the new image before the old pod is stopped. This also pre-pulls it (~2.3 GB).
+      - name: Pre-pull image on the node
+        run: |
+          set -euo pipefail
+          kubectl -n "$NAMESPACE" delete pod image-prepull --ignore-not-found --wait=true
+          kubectl -n "$NAMESPACE" run image-prepull --image="$IMAGE" --restart=Never \
+            --overrides='{"spec":{"nodeSelector":{"role":"legacy"},"automountServiceAccountToken":false}}' \
+            --command -- /bin/true
+          phase=""
+          for _ in $(seq 1 120); do
+            phase="$(kubectl -n "$NAMESPACE" get pod image-prepull -o jsonpath='{.status.phase}')"
+            reason="$(kubectl -n "$NAMESPACE" get pod image-prepull -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}')"
+            case "$phase/$reason" in
+              Succeeded/*) echo "image pulled"; break ;;
+              */ErrImagePull|*/ImagePullBackOff|*/InvalidImageName|Failed/*)
+                kubectl -n "$NAMESPACE" describe pod image-prepull | tail -20
+                kubectl -n "$NAMESPACE" delete pod image-prepull --ignore-not-found
+                echo "::error::The cluster cannot pull $IMAGE; the running Higress was not touched."
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+          kubectl -n "$NAMESPACE" delete pod image-prepull --ignore-not-found
+          [[ "$phase" == "Succeeded" ]] || { echo "::error::Timed out pulling $IMAGE"; exit 1; }
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          previous="$(kubectl -n "$NAMESPACE" get deployment higress -o jsonpath='{.spec.template.spec.containers[?(@.name=="higress")].image}')"
+          echo "Deploying $IMAGE (previous: $previous)"
+          sed "s|__IMAGE__|$IMAGE|" deploy/k3s/higress.yaml | kubectl -n "$NAMESPACE" apply -f -
+          if ! kubectl -n "$NAMESPACE" rollout status deployment/higress --timeout=10m; then
+            kubectl -n "$NAMESPACE" get pods -o wide || true
+            kubectl -n "$NAMESPACE" logs deployment/higress -c higress --tail=80 || true
+            echo "::warning::Rolling back to $previous"
+            kubectl -n "$NAMESPACE" rollout undo deployment/higress
+            kubectl -n "$NAMESPACE" rollout status deployment/higress --timeout=10m || true
+            echo "::error::Release failed health checks and was rolled back."
+            exit 1
+          fi
+
+      - name: Check public gateway
+        run: |
+          set -euo pipefail
+          # MCP servers require a consumer key, so an unauthenticated call must be rejected with 401.
+          code=""
+          for _ in $(seq 1 24); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$PUBLIC_URL/mcp-servers/higress-admin" || true)"
+            if [[ "$code" == "401" ]]; then echo "gateway healthy ($code)"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::$PUBLIC_URL/mcp-servers/higress-admin returned ${code:-nothing}, expected 401."
+          exit 1
