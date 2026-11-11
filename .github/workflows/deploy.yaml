@@ -88,7 +88,7 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     env:
-      # Production runs on the K3s cluster (k3s.seasonschange.cn), namespace higress.
+      # Production runs on the K3s cluster (k3s.tmlab.top), namespace higress.
       # KUBE_CONFIG is a kubeconfig for the namespace-scoped ServiceAccount higress/ci-deployer.
       NAMESPACE: higress
       IMAGE: docker.io/${{ secrets.DOCKER_USERNAME }}/higress-console:${{ needs.image.outputs.version }}
