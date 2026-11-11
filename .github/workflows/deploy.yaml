@@ -46,7 +46,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.meta.outputs.image }}
+      # Only the version: an output containing a secret value (DOCKER_USERNAME) is dropped by Actions.
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -64,6 +65,7 @@ jobs:
         run: |
           version="$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}"
           image="docker.io/${DOCKER_USERNAME}/higress-console:${version}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "Image: \`$image\`" >> "$GITHUB_STEP_SUMMARY"
 
@@ -89,7 +91,7 @@ jobs:
       # Production runs on the K3s cluster (k3s.seasonschange.cn), namespace higress.
       # KUBE_CONFIG is a kubeconfig for the namespace-scoped ServiceAccount higress/ci-deployer.
       NAMESPACE: higress
-      IMAGE: ${{ needs.image.outputs.image }}
+      IMAGE: docker.io/${{ secrets.DOCKER_USERNAME }}/higress-console:${{ needs.image.outputs.version }}
       PUBLIC_URL: https://mcp.tmlab.top
     steps:
       - uses: actions/checkout@v5
@@ -101,6 +103,7 @@ jobs:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
           set -euo pipefail
+          [[ "$IMAGE" =~ ^docker\.io/[a-z0-9._-]+/higress-console:[0-9]{12}-[0-9a-f]{7}$ ]] || { echo "::error::Bad image reference: '$IMAGE'"; exit 1; }
           [[ -n "$KUBE_CONFIG" ]] || { echo "::error::Repository secret KUBE_CONFIG is required."; exit 1; }
           install -m 700 -d ~/.kube
           printf '%s\n' "$KUBE_CONFIG" > ~/.kube/config
