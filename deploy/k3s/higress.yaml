@@ -1,0 +1,87 @@
+# Higress all-in-one (gateway + controller + embedded apiserver + this console) on the K3s cluster,
+# namespace `higress`. Applied by .github/workflows/deploy.yaml with __IMAGE__ substituted.
+#
+# Pre-created in the cluster (not in git):
+#   Secret higress-console-env  HIGRESS_CONSOLE_ADMIN_API_TOKENS (sha256 digest of the console API token)
+#   Secret higress-redis        password (also referenced by the MCP redis config in /data)
+# /data (routes, plugins, MCP servers, consumers) lives in PVC higress-data on node agent-1.
+# Redis runs as a sidecar so Higress MCP still finds it on 127.0.0.1:6379.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: higress-data, namespace: higress}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: higress, namespace: higress}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: higress}}
+  template:
+    metadata: {labels: {app: higress}}
+    spec:
+      nodeSelector: {role: legacy}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: higress
+          # Replaced by CI with docker.io/<user>/higress-console:<version>.
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          envFrom: [{secretRef: {name: higress-console-env}}]
+          ports:
+            - {name: console, containerPort: 8001}
+            - {name: http, containerPort: 8080}
+            - {name: https, containerPort: 8443}
+          volumeMounts: [{name: data, mountPath: /data}]
+          resources:
+            requests: {cpu: 200m, memory: 768Mi}
+            limits: {memory: 2Gi}
+          startupProbe:
+            httpGet: {path: /healthz/ready, port: 8001}
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 30
+            failureThreshold: 5
+        - name: redis
+          image: docker.io/library/redis:7-alpine
+          command: ["sh","-c","exec redis-server --bind 127.0.0.1 --port 6379 --requirepass \"$REDIS_PASSWORD\" --maxmemory 64mb --maxmemory-policy allkeys-lru --save ''"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: higress-redis, key: password}}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 128Mi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: higress-data}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: higress, namespace: higress}
+spec:
+  selector: {app: higress}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+    - {name: console, port: 8001, targetPort: 8001}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: mcp, namespace: higress}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: mcp.tmlab.top
+      http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: higress, port: {number: 8080}}}}
